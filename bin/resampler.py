@@ -6,7 +6,6 @@ import boto3
 import time
 import requests
 import tempfile
-from jpegtran import JPEGImage
 from shutil import copyfile
 from contextlib import closing
 from PIL import Image
@@ -14,6 +13,7 @@ from subprocess import call
 import functools
 import hashlib
 import signal
+import base64
 
 load_dotenv(find_dotenv())
 
@@ -88,33 +88,6 @@ def download_image(url):
         file.write(chunk)
   return file
 
-def resize_jpg(file, n):
-  """Resize a JPEG image.
-
-  Parameters
-  ----------
-  file : file
-      The original JPEG image resource.
-
-  n : int
-      The maximum width/height of the resized image.
-
-  Returns
-  -------
-  file or None
-      A file pointing to the resized image in JPEG format, or None if 
-      the file did not require resizing based on `n`. The caller is 
-      responsible for closing it.
-  """
-  output = tempfile.NamedTemporaryFile("w+b", suffix=".jpg")
-  img = JPEGImage(file.name)
-  if img.width > n or img.height > n:
-    w, h = scale_dim(img.width, img.height, n)
-    img.downscale(w, h, 90).save(output.name)
-    return output
-  else:
-    return None
-
 def resize_general(file, n):
   """Resize an image.
 
@@ -173,16 +146,21 @@ def generate(url, original, n):
   """
 
   ext = os.path.splitext(url)[1].lower()
-  if ext == ".jpg":
-    resample = resize_jpg(original, n)
-  elif ext in [".png", ".gif"]:
-    resample = resize_general(original, n)
+  resample = resize_general(original, n)
 
   if resample is not None:
     optimized = tempfile.NamedTemporaryFile("w+b", suffix=".jpg")
-    call(["guetzli", "--quality", "90", resample.name, optimized.name])
-    resample.close()
-    return (n, optimized)
+    rcode = call(["guetzli", "--quality", "90", resample.name, optimized.name])
+    if rcode != 0:
+      optimized.close()
+      return (n, resample)
+    else:
+      before_size = os.stat(resample.name).st_size
+      after_size = os.stat(optimized.name).st_size
+      ratio = int(100 * float(after_size) / float(before_size))
+      print("  {} ratio: {}".format(n, ratio))
+      resample.close()
+      return (n, optimized)
   else:
     return None
 
@@ -222,9 +200,9 @@ def upload(md5, local_path, remote_path):
       Path to the file destination on the remote server.
   """
   size = os.stat(local_path).st_size
-  print("upload s3 size={} md5={}".format(size, md5))
+  print("  upload thumbnail size={}".format(size))
   servers = os.environ.get("DANBOORU_SERVERS").split(",")
-  f = lambda x: call(["scp", local_path, x + ":" + remote_path])
+  f = lambda x: call(["scp", "-q", local_path, x + ":" + remote_path])
   list(map(f, servers))
 
 def upload_s3(md5, local_path, remote_name):
@@ -245,10 +223,9 @@ def upload_s3(md5, local_path, remote_name):
   key = "sample/" + remote_name
   with closing(open(local_path, "rb")) as file:
     size = os.stat(local_path).st_size
-    resize_md5 = hashlib.md5(file.read()).hexdigest()
     file.seek(0)
-    print("upload s3 size={} md5={}".format(size, md5))
-    s3.put_object(ACL="public-read", Body=file, Bucket="danbooru", Key=key, ContentMD5=resize_md5)
+    print("  upload large size={}".format(size))
+    s3.upload_fileobj(file, "danbooru", key, {"ACL" : "public-read"})
 
 def process_queue():
   """Listen to the SQS queue and process messages.
@@ -265,6 +242,7 @@ def process_queue():
         for message in response["Messages"]:
           receipt_handle = message["ReceiptHandle"]
           md5, image_url = message["Body"].split(",")
+          print(md5)
           paths = list(filter(None.__ne__, download_and_generate(image_url)))
           for size, file in paths:
             if size == 150:
@@ -273,6 +251,7 @@ def process_queue():
               upload_s3(md5, file.name, "sample-" + md5 + ".jpg")
           sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
 
+      print("sleeping")
       time.sleep(1)
 
     except KeyboardInterrupt:
