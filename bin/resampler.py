@@ -29,14 +29,17 @@ def pure_pil_alpha_to_color_v2(image, color=(255, 255, 255)):
   color -- Tuple r, g, b (default 255, 255, 255)
 
   """
-  image.load()  # needed for split()
-  channels = image.split()
-  if len(channels) < 4:
-    return image
-  background = Image.new('RGB', image.size, color)
-  background.paste(image, mask=channels[3])  # 3 is the alpha channel
-  image.close()
-  return background
+  try:
+    image.load()  # needed for split()
+    channels = image.split()
+    if len(channels) < 4:
+      return image
+    background = Image.new('RGB', image.size, color)
+    background.paste(image, mask=channels[3])  # 3 is the alpha channel
+    image.close()
+    return background
+  except OSError:
+    return None
 
 def scale_dim(w, h, max_size):
   """Scale a tuple such that it fits within a maximum size.
@@ -112,7 +115,9 @@ def resize_general(file, n):
     rgb = img.convert("RGB")
     img.close()
     img = rgb
-  img = pure_pil_alpha_to_color_v2(img)
+  composite = pure_pil_alpha_to_color_v2(img)
+  if composite is not None:
+    img = composite
   if img.width > n or img.height > n:
     w, h = scale_dim(img.width, img.height, n)
     img = img.resize((w, h), resample=Image.LANCZOS)
@@ -251,7 +256,6 @@ def process_queue():
               upload_s3(md5, file.name, "sample-" + md5 + ".jpg")
           sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
 
-      print("sleeping")
       time.sleep(1)
 
     except KeyboardInterrupt:
