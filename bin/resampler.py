@@ -110,7 +110,10 @@ def resize_general(file, n):
       responsible for closing it.
   """
   output = tempfile.NamedTemporaryFile("w+b", suffix=".jpg")
-  img = Image.open(file.name)
+  try:
+    img = Image.open(file.name)
+  except OSError:
+    return None
   if img.mode != "RGB":
     rgb = img.convert("RGB")
     img.close()
@@ -230,6 +233,7 @@ def upload_s3(md5, local_path, remote_name):
     size = os.stat(local_path).st_size
     file.seek(0)
     print("  upload large size={}".format(size))
+    print("  key={}".format(key))
     s3.upload_fileobj(file, "danbooru", key, {"ACL" : "public-read"})
 
 def process_queue():
